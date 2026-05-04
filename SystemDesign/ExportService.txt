@@ -1,0 +1,32 @@
+4. Interview Q&A
+Q1: "Walk me through how your Data Export Service handles a large export request."
+When a client needs to export a large dataset, we use a multi-part async pattern. First, the client initializes an export job via a POST, which creates a record in PostgreSQL and stores metadata in cloud storage. The client then uploads data in parts — each part is stored as a JSON Lines file in Azure Blob or GCP Cloud Storage. Once all parts are uploaded, the client calls a "complete" endpoint, which queues the job.
+
+A background hosted service polls the queue, picks up the job, downloads all parts, and uses a streaming generator to produce the final XLSX or CSV file. The file is uploaded directly to cloud storage using chunked block uploads for Azure, which keeps memory usage constant regardless of file size. The client then polls for status and receives a time-limited signed URL for direct download from cloud storage.
+
+This approach keeps the API responsive, avoids memory issues with large files, and offloads download bandwidth to the cloud provider.
+
+Q2: "How did you make the service cloud-agnostic across Azure and GCP?"
+I used the Strategy pattern. There's an IStorageOperations interface that defines all storage operations — upload, download, list, signed URL generation. We have two concrete implementations: AzureStorageOperations using the Azure Blob SDK and GcpStorageOperations using the Google Cloud Storage SDK. At startup, the DI container reads a CloudProvider config value and registers the appropriate implementation.
+
+The same approach extends to Kubernetes deployment — our Helm templates conditionally provision Azure Storage Accounts or GCP Buckets based on the target environment. The application code never directly references a specific cloud provider, so switching providers is a config change, not a code change.
+
+Q3: "How do you handle failures and ensure reliability in background processing?"
+We have a multi-layered resilience strategy. First, the background processor uses a state machine: jobs move from Queued → InProgress → Completed or Failed. If processing throws an exception, we capture the error message and stack trace in an ExportFailure table for diagnostics, then set the status to Failed.
+
+A retry mechanism checks failed items and re-queues them up to a configurable max retry count. We also handle "halted" scenarios — if a pod dies during processing, the job stays in InProgress. We detect this via a timeout threshold (HaltedProcessLookupInterval) and automatically re-queue it.
+
+At the database level, we use IDatabaseRetryPolicy for transient connection failures. And the archival service runs as a scheduled CronJob that transactionally moves completed exports to an archive table and cleans up active tables.
+
+Q4: "What were the key performance optimizations you implemented?"
+The biggest optimization was streaming file generation. Instead of building an entire XLSX or CSV file in memory, the generators write directly to a stream. For Azure, we use block-based chunked uploads — staging blocks incrementally and committing as a single blob — which keeps memory constant at the configured buffer size regardless of the final file size.
+
+We also use request decompression middleware so clients can send compressed payloads, response compression for API responses, and PostgreSQL connection pooling via a singleton factory. Signed URLs let clients download directly from cloud storage, so our API doesn't become a bandwidth bottleneck. We validate all this with BenchmarkDotNet tests to catch performance regressions.
+
+Q5: "How is your service deployed and what observability do you have?"
+The service runs on Kubernetes, deployed via Helm charts that extend a platform deployment template. We have separate charts for the API service and the data archiver CronJob. Health is monitored through readiness probes (/readyz) and liveness probes (/livez).
+
+For observability, every request gets a correlation ID injected via middleware, which propagates through all log entries. We use Serilog for structured logging, so we can trace an export through its entire lifecycle — from API request to background processing to cloud upload. The global exception middleware ensures unhandled errors are captured with full context. Authentication is handled via JWT tokens validated against ADFS, with permissions enforced through a centralized permissions server.
+
+5. Elevator Pitch
+"I built a Data Export Service — a cloud-agnostic .NET microservice that lets internal applications generate and download large Excel and CSV files on demand. Clients upload data in parts through a REST API, and a background processor assembles the final file and stores it in Azure Blob or GCP Cloud Storage — whichever cloud the team is running on. It uses streaming generation so memory stays flat even for 100MB+ files, a PostgreSQL-backed job queue with automatic retry and failure recovery, and signed URLs so downloads go directly from cloud storage. I also built a reusable .NET client library so downstream teams can integrate with just a few lines of code. The whole thing runs on Kubernetes with Helm, full structured logging, and correlation tracing end to end."
