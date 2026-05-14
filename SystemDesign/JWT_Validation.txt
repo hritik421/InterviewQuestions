@@ -1,0 +1,16 @@
+the actual flow is:
+
+Corrected understanding
+Step	What happens
+1. Login	User hits the portal → AuthProxy redirects to identity provider (Auth0 or ADFS) → user authenticates → gets a JWT
+2. Request	Browser sends requests with the JWT in the Authorization header
+3. Validation	ServiceBase alone validates the JWT (signature, issuer, audience) inside the Looker Service pod
+AuthProxy in this setup is purely the OAuth/OIDC login orchestrator — it handles the redirect dance and token acquisition. It does not sit as a validation proxy 
+on every request to the backend.
+
+So who actually validates?
+Only ServiceBase (via AddServiceBase() → JWT Bearer middleware). That's why:
+
+ingressForwardJWT: true — ensures the JWT passes through to the pod
+EnableJwtValidation: true — ServiceBase must validate it because nothing else does
+The ADFS cert is mounted (/app/certs/adfs-sig.crt) so ServiceBase can verify ADFS-signed tokens locally
